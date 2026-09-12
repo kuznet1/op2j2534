@@ -1,0 +1,15 @@
+# build output
+build/
+*.obj
+*.lib
+*.exp
+*.dll
+*.pdb
+
+# python
+__pycache__/
+*.pyc
+venv/
+
+# logs / scratch
+*.log
