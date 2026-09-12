@@ -90,9 +90,19 @@ if ($Uninstall) {
 }
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$src32 = Join-Path $here 'build\x86\op2j2534.dll'
-$src64 = Join-Path $here 'build\x64\op2j2534_64.dll'
-if (-not (Test-Path $src32)) { throw "missing $src32 - run build.bat first" }
+
+# Locate the DLLs. Two supported layouts:
+#   - source tree:      build\x86\op2j2534.dll, build\x64\op2j2534_64.dll
+#   - release download: op2j2534.dll and op2j2534_64.dll next to this script
+function Find-Dll([string[]]$candidates) {
+    foreach ($c in $candidates) { if (Test-Path $c) { return (Resolve-Path $c).Path } }
+    return $null
+}
+$src32 = Find-Dll @((Join-Path $here 'build\x86\op2j2534.dll'), (Join-Path $here 'op2j2534.dll'))
+$src64 = Find-Dll @((Join-Path $here 'build\x64\op2j2534_64.dll'), (Join-Path $here 'op2j2534_64.dll'))
+if (-not $src32) {
+    throw "op2j2534.dll not found. Put it (and op2j2534_64.dll) next to this script, or run build.bat first."
+}
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Copy-Item $src32 $InstallDir -Force

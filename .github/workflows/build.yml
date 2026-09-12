@@ -1,0 +1,59 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write        # needed for the release job to attach binaries
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # windows-latest ships Visual Studio + the Windows SDK, which is all
+      # build.bat needs. It locates the toolchain via vswhere and builds both
+      # the 32- and 64-bit DLLs.
+      - name: Build (x86 + x64)
+        shell: cmd
+        run: build.bat
+
+      - name: Show outputs
+        shell: cmd
+        run: |
+          dir build\x86
+          dir build\x64
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: op2j2534-dll
+          path: |
+            build/x86/op2j2534.dll
+            build/x64/op2j2534_64.dll
+          if-no-files-found: error
+
+      # On a version tag (v1.0.0, ...), publish a GitHub Release with the DLLs.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/x86/op2j2534.dll
+            build/x64/op2j2534_64.dll
+            register.ps1
+          generate_release_notes: true
+          body: |
+            Prebuilt J2534 driver for the Tactrix OpenPort 2.0.
+
+            - `op2j2534.dll` — 32-bit (for 32-bit J2534 applications, e.g. most tuning/diag tools)
+            - `op2j2534_64.dll` — 64-bit
+
+            Install: drop the DLLs somewhere permanent and run `register.ps1`
+            from an elevated PowerShell (see the README). Not affiliated with
+            Tactrix; provided as is, with no warranty — this talks to ECUs.

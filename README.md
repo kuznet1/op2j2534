@@ -110,16 +110,40 @@ Produces `build\x86\op2j2534.dll` and `build\x64\op2j2534_64.dll`.
 
 ## Install
 
-From an **elevated** PowerShell:
+You do **not** need to build anything or install a driver from Tactrix. The
+OpenPort 2.0 already appears as a USB serial port on Windows 10/11 out of the
+box; this just registers the J2534 DLL so your diagnostic/tuning app can find it.
+
+### Option 1 — download the prebuilt driver (easiest)
+
+1. Go to the [Releases](../../releases) page and download, from the latest
+   release: **`op2j2534.dll`**, **`op2j2534_64.dll`**, and **`register.ps1`**.
+2. Put all three in one folder.
+3. Right-click PowerShell → **Run as administrator**, then:
+   ```powershell
+   cd <that folder>
+   .\register.ps1
+   ```
+4. Plug in the OpenPort 2.0 and pick **"OpenPort 2.0 (CDC)"** in your J2534 app.
+
+That's it — no reboot, no Tactrix driver, nothing to break on the next Windows
+update.
+
+### Option 2 — build from source
+
+Build (see below), then from an **elevated** PowerShell in the repo root:
 
 ```powershell
 .\register.ps1
 ```
 
-This copies the DLLs to `C:\Program Files (x86)\OpenportJ2534\` and registers
-them under `PassThruSupport.04.04`, where any J2534 application will find them.
-32-bit applications (TCMFlasher included) read the `WOW6432Node` view; 64-bit
-applications read the native view. Both are registered.
+### What register.ps1 does
+
+It copies the DLLs to `C:\Program Files (x86)\OpenportJ2534\` and registers them
+under `PassThruSupport.04.04`, where any J2534 application looks for pass-thru
+devices. 32-bit applications (most tuning/diag tools, TCMFlasher included) read
+the `WOW6432Node` view; 64-bit applications read the native view. Both are
+registered.
 
 A failed Tactrix install leaves a registry entry pointing at a DLL that is not
 present, which shows up in device pickers as an adapter that can never open.
