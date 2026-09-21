@@ -212,3 +212,26 @@ rejects with identifies what it operates on:
 | `atl<proto>`     | returns `aro`            | accepted, effect unknown |
 
 `atw` and `aty` remain unmapped.
+
+### `atx` — enter the bootloader. Do not send it.
+
+The vendor DLL's firmware updater sends `atx %d` immediately before it starts
+"waiting for bootloader" and then talks a different, terse protocol to it
+(`tre %X` to erase, and a flash write command, with replies checked as
+"invalid erase response" / "invalid flash response"). Its own text warns that
+"you must connect to the device again after a bootloader recovery".
+
+So `atx` drops the device out of the J2534 firmware into the bootloader, and
+the commands that follow erase and rewrite flash. Never send it while probing,
+and never sweep the alphabet blind on a device you care about — this is the one
+letter that can leave a unit needing recovery. Recovered from the unpacked
+`op20pt32.dll` image, not from the device.
+
+## 5. Standalone SD-card logging
+
+The OP2 also has a microSD slot and a logger that runs without a host: it reads
+`logcfg.txt` from the card root and writes `log####.csv` back to it. That is
+entirely firmware — none of it is reachable through the commands above, and
+none of it appears in the vendor DLL, whose unpacked image contains no logging
+keywords at all. USB and standalone logging are mutually exclusive: the device
+does not log while it is plugged into a PC.

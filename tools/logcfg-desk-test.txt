@@ -1,0 +1,59 @@
+; Desk test for OP2 standalone SD-card logging.
+;
+; Copy this to the root of the OP2's microSD card AS logcfg.txt (the name is
+; mandatory), then bench the OP2 on 12 V with a Kvaser on the CAN pins and run
+;   python sniff_logcfg.py
+;
+; It answers two questions at once:
+;
+;  * the adc channel below logs the OP2's own pin voltages, which works with no
+;    ECU and no CAN traffic at all - if battvolts shows up in log0001.csv then
+;    the card, the config parser and the logger firmware are all alive.
+;  * the obd channel makes the logger poll, which is what the sniffer watches,
+;    and tells us which CAN ID the firmware actually transmits on.
+;
+; No triggers are defined, so logging runs continuously while powered.
+
+;---------------- obd ----------------
+type = obd
+protocolid = 6			; ISO15765 - the only protocol the logger supports
+
+; mode $23 request/response widths, GM flavour. Harmless for the mode $01
+; parameters below; set up here so a mode $23 line can be added without
+; touching anything else.
+mode23txaddrwidth = 4
+mode23txlenwidth = 2
+mode23rxaddrwidth = 4
+
+; Legislated OBD-II PIDs. Any compliant ECU answers these, so they are the
+; right thing to ask for before trusting anything Saab specific.
+
+paramname = rpm
+mode = 0x01
+paramid = 0x0C
+databits = 16
+scalingrpn = x,0.25,*
+
+paramname = speed
+mode = 0x01
+paramid = 0x0D
+
+paramname = coolant
+mode = 0x01
+paramid = 0x05
+scalingrpn = x,40,-
+
+;---------------- adc ----------------
+; The OP2's own analog inputs, in millivolts. paramid is the OBD pin number;
+; only 8, 12 and 16 are readable. This needs no ECU, so it is the proof that
+; the logger itself is running.
+
+type = adc
+
+paramname = battvolts
+paramid = 16
+scalingrpn = x,0.001,*
+
+paramname = pin8volts
+paramid = 8
+scalingrpn = x,0.001,*
