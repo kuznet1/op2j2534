@@ -19,6 +19,9 @@ PROTO = {"J1850VPW": 1, "J1850PWM": 2, "ISO9141": 3,
 READ_VBATT, READ_PROG_VOLTAGE = 0x03, 0x0E
 GET_CONFIG, SET_CONFIG = 0x01, 0x02
 LOOPBACK = 0x03
+FLOW_CONTROL_FILTER = 3
+ISO15765_FRAME_PAD, ISO15765_ADDR_TYPE = 0x40, 0x80
+ERR_INVALID_MSG = 0x0A
 
 
 class SCONFIG(ctypes.Structure):
@@ -28,6 +31,13 @@ class SCONFIG(ctypes.Structure):
 class SCONFIG_LIST(ctypes.Structure):
     _fields_ = [("NumOfParams", ctypes.c_ulong),
                 ("ConfigPtr", ctypes.POINTER(SCONFIG))]
+
+
+class PASSTHRU_MSG(ctypes.Structure):
+    _fields_ = [("ProtocolID", ctypes.c_ulong), ("RxStatus", ctypes.c_ulong),
+                ("TxFlags", ctypes.c_ulong), ("Timestamp", ctypes.c_ulong),
+                ("DataSize", ctypes.c_ulong), ("ExtraDataIndex", ctypes.c_ulong),
+                ("Data", ctypes.c_ubyte * 4128)]
 
 
 def load(path):
@@ -42,9 +52,14 @@ def load(path):
     dll.PassThruIoctl.argtypes = [ctypes.c_ulong, ctypes.c_ulong,
                                   ctypes.c_void_p, ctypes.c_void_p]
     dll.PassThruGetLastError.argtypes = [ctypes.c_char_p]
+    dll.PassThruStartMsgFilter.argtypes = [ctypes.c_ulong, ctypes.c_ulong,
+                                           ctypes.POINTER(PASSTHRU_MSG),
+                                           ctypes.POINTER(PASSTHRU_MSG),
+                                           ctypes.POINTER(PASSTHRU_MSG),
+                                           ctypes.POINTER(ctypes.c_ulong)]
     for fn in ("PassThruOpen", "PassThruClose", "PassThruConnect",
                "PassThruDisconnect", "PassThruReadVersion", "PassThruIoctl",
-               "PassThruGetLastError"):
+               "PassThruGetLastError", "PassThruStartMsgFilter"):
         getattr(dll, fn).restype = ctypes.c_long
     return dll
 
@@ -53,6 +68,52 @@ def err(dll):
     b = ctypes.create_string_buffer(128)
     dll.PassThruGetLastError(b)
     return b.value.decode("latin1", "replace")
+
+
+def msg(proto, flags, data):
+    m = PASSTHRU_MSG()
+    m.ProtocolID, m.TxFlags, m.DataSize = proto, flags, len(data)
+    for i, b in enumerate(data):
+        m.Data[i] = b
+    return m
+
+
+def fc_filter_tests(dll, dev):
+    """FLOW_CONTROL filters as Techstream installs them, incl. extended
+    addressing (Toyota 0x750 gateway). Needs no bus partner: the device
+    accepts or rejects the filter by itself. Returns the number of failures."""
+    ch = ctypes.c_ulong(0)
+    rc = dll.PassThruConnect(dev, PROTO["ISO15765"], 0, 500000, ctypes.byref(ch))
+    if rc != 0:
+        print("FC filters: cannot connect ISO15765 (%s)" % err(dll))
+        return 1
+
+    pad, ext = ISO15765_FRAME_PAD, ISO15765_FRAME_PAD | ISO15765_ADDR_TYPE
+    cases = [
+        # name, TxFlags, mask, pattern, flow control, expected rc
+        ("normal 0x7E8/0x7E0, 4 bytes", pad,
+         [0xFF] * 4, [0, 0, 0x07, 0xE8], [0, 0, 0x07, 0xE0], 0),
+        ("extended 0x758/0x750 addr B8, 5 bytes", ext,
+         [0xFF] * 5, [0, 0, 0x07, 0x58, 0xB8], [0, 0, 0x07, 0x50, 0xB8], 0),
+        ("extended without address byte, 4 bytes", ext,
+         [0xFF] * 4, [0, 0, 0x07, 0x58], [0, 0, 0x07, 0x50], ERR_INVALID_MSG),
+    ]
+    failures = 0
+    for name, flags, mask, patt, fc, want in cases:
+        proto = PROTO["ISO15765"]
+        m, p, f = msg(proto, flags, mask), msg(proto, flags, patt), msg(proto, flags, fc)
+        fid = ctypes.c_ulong(0)
+        rc = dll.PassThruStartMsgFilter(ch, FLOW_CONTROL_FILTER, ctypes.byref(m),
+                                        ctypes.byref(p), ctypes.byref(f),
+                                        ctypes.byref(fid))
+        ok = rc == want
+        failures += not ok
+        print("FC filter %-40s -> %d %s  [%s]"
+              % (name, rc, "id=%d" % fid.value if rc == 0 else "(%s)" % err(dll),
+                 "PASS" if ok else "FAIL, expected %d" % want))
+
+    dll.PassThruDisconnect(ch)
+    return failures
 
 
 def main():
@@ -115,8 +176,10 @@ def main():
     for ch in chans:
         dll.PassThruDisconnect(ch)
 
+    failures = fc_filter_tests(dll, dev)
+
     print("PassThruClose             -> %d" % dll.PassThruClose(dev))
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

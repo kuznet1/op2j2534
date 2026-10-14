@@ -80,20 +80,20 @@ format string to the character pushed at its call site.
 | `at%c%d %lu %u`            | g         | `atg<proto> <param> <seq>` get config         |
 | `at%c%d %lu %lu %u`        | s, t, y   | `ats<proto> <param> <value> <seq>` set config |
 | `at%c%d %lu %lu %u %u`     | t         | `att<proto> <len> <a> <b> <seq>` transmit     |
-| `at%c%d %d %d %d %u`       | f         | `atf<proto> ... <seq>` message filter         |
+| `at%c%d %d %d %d %u`       | f         | `atf<proto> <type> <tx_flags> <len> <seq>` filter |
 | `at%c%d %d %d %u`          | y         | unmapped                                      |
 | `at%c%d %d %d %lu %lu %u`  | m         | periodic message                              |
-| `at%c%d %lu %lu %lu %u`    | o         | `ato<proto> <baud> <flags> <chan> <seq>` open |
+| `at%c%d %lu %lu %lu %u`    | o         | `ato<proto> <flags> <baud> <chan> <seq>` open |
 
 ### Verified on hardware
 
 ```
 ati                     -> ari main code version : 1.17.4877
 ata 1                   -> aro 1
-ato5 500000 0 0 2       -> aro 2         (raw CAN, 500 kbit, channel 0)
-ato6 500000 0 1 3       -> aro 3         (ISO15765, channel 1)
-ato3 10400  0 2 4       -> aro 4         (ISO9141, channel 2)
-ato5 500000 0 3 5       -> are 20 5      (only three channels exist)
+ato6 0 500000 0 3       -> aro 3         (ISO15765, 500 kbit, channel 0)
+ato3 4096 10400 0 3     -> aro 3         (ISO9141, flags 0x1000, 10400 baud)
+ato4 4096 10400 0 42    -> aro 42        (ISO14230)
+ato5 0 500000 3 5       -> are 20 5      (only three channels exist)
 atc5 6                  -> aro 6
 ats5 3 1 7              -> aro 7         (LOOPBACK = 1)
 atg5 3 8                -> arg5 3 1 8    (reads it back)
@@ -176,16 +176,47 @@ Validated field-by-field against a Kvaser: injected id `0x123` /
 `AABBCCDDEEF00102` and every static broadcast frame (`0x0F9`, `0x199`, `0x1AF`,
 `0x1F5`, `0x4C9`, `0x77F`) decoded to the exact id and data the Kvaser saw.
 
+#### The status byte is the device's own bitmap, not J2534 RxStatus
+
+Passing it through unchanged breaks any application that checks RxStatus
+(Techstream does):
+
+| Device | Meaning | Record data | J2534 RxStatus |
+|--------|---------|-------------|----------------|
+| `0x10` | echo of our own transmit (TX indication) | CAN id only | `0x09` TX_MSG_TYPE \| TX_INDICATION |
+| `0x80` | ISO-TP first frame received, message being reassembled | CAN id only | `0x02` START_OF_MESSAGE |
+| `0x40` | complete received message | id + data | `0x00` |
+| `0x04` | extended addressing; combined with the bits above (`0x14`, `0x44`, `0x84`) | CAN id + address byte first | `0x80` ISO15765_ADDR_TYPE, added to the above |
+
+A multi-frame reply therefore arrives as two records: a `0x80` record carrying
+only the CAN id, then one `0x40` record with the whole reassembled message
+(e.g. a 20-byte VIN reply is `ar6 1d 40 … 07 e8 49 02 01 4a 54 …`).
+
+Every ISO15765 transmit is followed by a `0x10` echo record, usually just
+before the `aro` reply to the `att` command.
+
 ### Filters — REQUIRED before any frame is delivered
 
 The device forwards **no** received frames to the host until a filter exists.
 
-    atf<proto> <type> <mask_len> <pattern_len> <seq>\r\n<mask bytes><pattern bytes>
+    atf<proto> <type> <tx_flags> <len> <seq>\r\n<mask><pattern>[<flow_control>]
 
 * `type` is the J2534 filter type: `1`=PASS, `2`=BLOCK, `3`=FLOW_CONTROL.
-* mask and pattern follow the CRLF as a binary payload, each a 4-byte
-  big-endian CAN-ID selector, so the lengths are `4 4`.
-* reply is `arf<proto> <filter_id> <seq>`.
+* `tx_flags` are J2534 TxFlags. For a flow-control filter they are the flags
+  of the **flow-control frames the device sends**; Techstream passes
+  `0x40` (ISO15765_FRAME_PAD), and `0xC0` (pad + ISO15765_ADDR_TYPE).
+* `len` is the length of **each** message that follows: 4 for a CAN id, 5
+  with ISO15765_ADDR_TYPE (CAN id + extended address byte, J2534's layout for
+  extended addressing). A bad length is rejected with `are 10`
+  (ERR_INVALID_MSG).
+* mask and pattern follow the CRLF as a binary payload, each a big-endian
+  CAN-ID selector of `len` bytes. A FLOW_CONTROL filter carries a **third**
+  message: the id the device sends its flow-control frames with (the request
+  id, e.g. pattern `0x7E8`, flow control `0x7E0`). That is 12 bytes in all,
+  or 15 with extended addressing, e.g. Techstream for module `0xB8` behind
+  `0x750`: `atf6 3 192 5` + `ff ff ff ff ff 00 00 07 58 b8 00 00 07 50 b8`.
+* reply is `arf<proto> <filter_id> <seq>`. Filter ids count up across the
+  session.
 * A PASS filter with mask `0` / pattern `0` accepts every id.
 
 ### A lesson worth keeping

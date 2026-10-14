@@ -236,6 +236,33 @@ long WINAPI PassThruDisconnect(unsigned long ChannelID)
 
 /* ------------------------------------------------------------- messaging */
 
+/* The record's status byte is the device's own bitmap, not J2534 RxStatus.
+ * Seen on a live ISO15765 bus, against what the genuine DLL reports for the
+ * same frames:
+ *   0x04  extended addressing       -> ISO15765_ADDR_TYPE (0x80)
+ *         (seen only on 0x750/0x758 traffic, as 0x14/0x44/0x84)
+ *   0x10  echo of our own transmit  -> TX_MSG_TYPE | TX_INDICATION (0x09)
+ *   0x40  normal received message   -> 0
+ *   0x80  ISO-TP first frame seen   -> START_OF_MESSAGE (0x02)
+ *         (id only; the reassembled message follows as a 0x40 record)
+ * Other bits are not mapped yet and are dropped. */
+#define OP2_RXS_EXT_ADDR 0x04
+#define OP2_RXS_TX_DONE  0x10
+#define OP2_RXS_RX       0x40
+#define OP2_RXS_FIRST    0x80
+
+static unsigned long map_rx_status(unsigned long s)
+{
+    unsigned long r = 0;
+    if (s & OP2_RXS_TX_DONE)
+        r |= TX_MSG_TYPE | TX_INDICATION;
+    if (s & OP2_RXS_FIRST)
+        r |= START_OF_MESSAGE;
+    if (s & OP2_RXS_EXT_ADDR)
+        r |= ISO15765_ADDR_TYPE;
+    return r;
+}
+
 long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
                              unsigned long *pNumMsgs, unsigned long Timeout)
 {
@@ -269,8 +296,10 @@ long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
         PASSTHRU_MSG m;
         op2_pump(&g_dev);
         while (got < want && op2_rx_pop(&g_dev, &m)) {
-            if (m.ProtocolID == c->protocol)
+            if (m.ProtocolID == c->protocol) {
+                m.RxStatus = map_rx_status(m.RxStatus);
                 pMsg[got++] = m;
+            }
         }
     }
 
@@ -284,8 +313,10 @@ long WINAPI PassThruReadMsgs(unsigned long ChannelID, PASSTHRU_MSG *pMsg,
             break;
         if (!op2_wait_rx(&g_dev, &m, (DWORD)remaining))
             break;
-        if (m.ProtocolID == c->protocol)
+        if (m.ProtocolID == c->protocol) {
+            m.RxStatus = map_rx_status(m.RxStatus);
             pMsg[got++] = m;
+        }
     }
 
     *pNumMsgs = got;
@@ -429,36 +460,58 @@ long WINAPI PassThruStartMsgFilter(unsigned long ChannelID, unsigned long Filter
         UNLOCK(); return rc;
     }
 
-    /* atf<protocol> <type> <mask_len> <pattern_len> <seq> + <mask><pattern>.
+    /* atf<protocol> <type> <tx_flags> <msg_len> <seq> + <mask><pattern>[<flow_control>].
+     *
+     * <msg_len> is the length of EACH of mask, pattern and flow control (4,
+     * or 5 with extended addressing), and <tx_flags> are the J2534 TxFlags the device uses for the FC
+     * frames it sends. Verified on a car: with tx_flags=4 (an earlier guess
+     * that read this slot as "mask_len") the FC frame goes out unpadded, the
+     * ECU ignores it and a multi-frame reply stalls after its first frame;
+     * with ISO15765_FRAME_PAD (0x40) the full VIN arrives. A bad <msg_len>
+     * is rejected with ERR_INVALID_MSG.
      *
      * Confirmed on hardware: the mask and pattern are sent as a binary payload
      * after the CRLF, exactly like 'att' sends its data. For CAN each is the
-     * 4-byte big-endian message-ID selector. The device replies
+     * 4-byte big-endian message-ID selector, plus the address byte with
+     * extended addressing. The device replies
      * 'arf<proto> <filter_id> <seq>'. A pass filter with mask 0 / pattern 0
      * accepts every ID; INSTALLING A FILTER IS REQUIRED before the device
      * forwards any received frame to the host.
      *
      * Filter type on the wire matches J2534: 1=PASS, 2=BLOCK, 3=FLOW_CONTROL. */
     {
-        unsigned char payload[8];
-        unsigned long mask = 0, patt = 0;
+        unsigned char payload[15];
+        size_t payload_len;
+        unsigned long len = 4;
+        unsigned long tx_flags = pMaskMsg->TxFlags;
+        const PASSTHRU_MSG *msgs[3];
+        int k, nmsgs = 2;
         op2_reply rep;
 
-        if (pMaskMsg->DataSize >= 4)
-            mask = ((unsigned long)pMaskMsg->Data[0] << 24) |
-                   ((unsigned long)pMaskMsg->Data[1] << 16) |
-                   ((unsigned long)pMaskMsg->Data[2] << 8) | pMaskMsg->Data[3];
-        if (pPatternMsg->DataSize >= 4)
-            patt = ((unsigned long)pPatternMsg->Data[0] << 24) |
-                   ((unsigned long)pPatternMsg->Data[1] << 16) |
-                   ((unsigned long)pPatternMsg->Data[2] << 8) | pPatternMsg->Data[3];
-        payload[0] = (unsigned char)(mask >> 24); payload[1] = (unsigned char)(mask >> 16);
-        payload[2] = (unsigned char)(mask >> 8);  payload[3] = (unsigned char)mask;
-        payload[4] = (unsigned char)(patt >> 24); payload[5] = (unsigned char)(patt >> 16);
-        payload[6] = (unsigned char)(patt >> 8);  payload[7] = (unsigned char)patt;
+        msgs[0] = pMaskMsg;
+        msgs[1] = pPatternMsg;
+        if (FilterType == FLOW_CONTROL_FILTER) {
+            msgs[2] = pFlowControlMsg;
+            nmsgs = 3;
+            tx_flags = pFlowControlMsg->TxFlags;   /* the flags of the FC frames */
+        }
 
-        rc = op2_command(&g_dev, &rep, 2000, payload, sizeof(payload),
-                         "atf%lu %lu 4 4", c->protocol, FilterType);
+        if (tx_flags & ISO15765_ADDR_TYPE)
+            len = 5;
+        for (k = 0; k < nmsgs; k++) {
+            if (FilterType == FLOW_CONTROL_FILTER && msgs[k]->DataSize != len) {
+                rc = fail(ERR_INVALID_MSG, "flow control filter message has wrong length");
+                UNLOCK(); return rc;
+            }
+            /* A short PASS/BLOCK selector is zero-filled, i.e. matches any id. */
+            memset(payload + k * len, 0, len);
+            memcpy(payload + k * len, msgs[k]->Data,
+                   msgs[k]->DataSize < len ? msgs[k]->DataSize : len);
+        }
+        payload_len = nmsgs * len;
+
+        rc = op2_command(&g_dev, &rep, 2000, payload, payload_len,
+                         "atf%lu %lu %lu %lu", c->protocol, FilterType, tx_flags, len);
         if (rc != STATUS_NOERROR) {
             rc = device_error(rc);
             UNLOCK(); return rc;

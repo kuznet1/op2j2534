@@ -36,7 +36,7 @@ again**.
 ## Status
 
 Verified against real hardware (firmware `1.17.4877`), including a full ISO-TP
-read of a Gen2 Saab TCM on a live vehicle:
+read of a Gen2 Saab TCM on a live vehicle, and Techstream identifying a 2016 Toyota:
 
 | Area | State |
 |---|---|
@@ -48,14 +48,16 @@ read of a Gen2 Saab TCM on a live vehicle:
 | `Ioctl READ_VBATT` / `READ_PROG_VOLTAGE` | working |
 | `Ioctl SET_CONFIG` / `GET_CONFIG` | working — verified by round-trip |
 | `PassThruWriteMsgs` | **working** — transmits and is ACKed on the bus |
-| `PassThruReadMsgs` | **working** — binary RX frames decoded, validated vs Kvaser |
-| `PassThruStartMsgFilter` | **working** — real `atf` filter; required for RX |
+| `PassThruReadMsgs` | **working** — binary RX frames decoded, validated vs Kvaser; device status mapped to J2534 RxStatus |
+| `PassThruStartMsgFilter` | **working** — PASS, BLOCK and FLOW_CONTROL (with FC id and TxFlags); required for RX |
+| `PassThruStopMsgFilter`, `Ioctl CLEAR_MSG_FILTERS` | host-side only — filters are not removed on the device yet |
 | Full request/response (software ISO-TP over raw CAN) | **working** — read TCM VIN, supplier, DIDs |
+| Hardware ISO-TP (ISO15765, multi-frame both ways) | **working** — Techstream: vehicle ID, VIN, live data |
 | `PassThruSetProgrammingVoltage` | implemented, not yet bench-verified |
 | Periodic messages, `FAST_INIT`, `FIVE_BAUD_INIT` | report `ERR_NOT_SUPPORTED` |
 
-Three bring-up bugs — since fixed — are worth calling out because they made a
-perfectly good adapter look dead (see PROTOCOL.md §4):
+Five bring-up bugs — since fixed — are worth calling out because they made a
+perfectly good adapter look dead or broken (see PROTOCOL.md §4):
 
 1. **Open argument order** is `ato<proto> <flags> <baud> <chan>` — Flags before
    Baudrate, matching the J2534 API. Baud in the wrong slot leaves DATA_RATE at
@@ -64,6 +66,17 @@ perfectly good adapter look dead (see PROTOCOL.md §4):
    instantly without transmitting; pass `J2534_Timeout * 1000` µs.
 3. **A message filter is required** before the device delivers any received
    frame. `PassThruStartMsgFilter` installs one on the wire.
+4. **A flow-control filter is `atf<proto> 3 <TxFlags> <len>` + mask, pattern
+   and FC id, each `len` bytes: 4 (12 in all), or 5 with extended addressing
+   (CAN id + address byte, 15 in all).** Without the FC id the filter is
+   rejected. With the TxFlags slot misread as a length, flow-control frames go
+   out unpadded; with the extended address byte cut off, they carry the wrong
+   address. Either way the ECU ignores them and every multi-frame reply stalls
+   after its first frame.
+5. **The RX status byte is the device's own bitmap.** `0x10` (TX echo),
+   `0x80` (first frame), `0x40` (message) and `0x04` (extended addressing)
+   must be mapped to J2534 `0x09` / `0x02` / `0x00` / `0x80`, or applications
+   such as Techstream discard the replies.
 
 Unverified calls still return honest `ERR_NOT_SUPPORTED` rather than pretending
 to work.
@@ -165,8 +178,12 @@ Set `OP2_J2534_LOG` to a file path and the DLL logs every API call and every
 byte exchanged with the device:
 
 ```
-TX: ato5 500000 0 0 5
-RX: aro 5
+TX: ato6 0 500000 0 3 | payload(0)=[]
+RX: aro 3
+TX: att6 5 64 1000000 31 | payload(5)=[00 00 07 e2 3e]
+RX frame proto=6 status=16 ts=3149420434 | payload(4)=[00 00 07 e2]
+RX: aro 31
+RX frame proto=6 status=64 ts=3149424259 | payload(5)=[00 00 07 ea 7e]
 ```
 
 ## Testing

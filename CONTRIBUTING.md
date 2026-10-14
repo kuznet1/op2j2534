@@ -64,12 +64,24 @@ PROTOCOL.md       the reverse-engineered wire protocol (read this first)
 - **Transmit needs a nonzero timeout** (`att … <tx_timeout_us>`), or the
   firmware reports `ERR_TIMEOUT` instantly without sending.
 - **A filter must be installed** before the device delivers any received frame.
+- **`atf` is `<type> <TxFlags> <len>`, not `<type> <mask_len> <pattern_len>`.**
+  Both read "4 4" for a CAN filter, which hides the difference until a
+  flow-control filter sends unpadded FC frames and multi-frame replies stall.
+  A FLOW_CONTROL filter also needs the FC id as a third message, and with
+  extended addressing every message is 5 bytes (CAN id + address byte).
+- **The RX record status byte is not J2534 RxStatus.** Map it (see
+  PROTOCOL.md §4) — applications check `TX_MSG_TYPE` and `START_OF_MESSAGE`.
 
 ## Good first / high-value contributions
 
-- **Hardware ISO-TP (J2534 protocol 6):** the firmware supports it; the DLL
-  currently does software ISO-TP over raw CAN. Needs the `atf` flow-control
-  filter form validated on a car.
+- **Remove filters on the device:** `PassThruStopMsgFilter` and
+  `CLEAR_MSG_FILTERS` only update the host-side table. Verify what
+  `atk<proto> <id>` does to a live filter and send it.
+- **Unmapped RX status bits:** `0x04`, `0x10`, `0x40` and `0x80` are mapped
+  (ISO15765). Raw CAN, K-line and ISO-TP error cases may use others; the DLL
+  currently drops any it does not know.
+- **ISO-TP messages longer than ~246 bytes:** the RX record length is one
+  byte. How the device delivers longer reassembled messages is unknown.
 - **Periodic messages** (`PassThruStartPeriodicMsg`): the device has an `atm`
   command; its argument layout is not yet confirmed.
 - **K-line init** (`FAST_INIT` / `FIVE_BAUD_INIT`) for ISO9141/ISO14230.

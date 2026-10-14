@@ -44,6 +44,28 @@ void op2_log(const char *fmt, ...)
     LeaveCriticalSection(&g_log_lock);
 }
 
+static const char* op2_hex(const void *buf, size_t len)
+{
+    static char hex[J2534_MAX_DATA * 3 + 1];  /* a whole message, never truncated */
+    const unsigned char *p = buf;
+    size_t i;
+
+    if (!buf || !len) {
+        hex[0] = '\0';
+        return hex;
+    }
+
+    if (len * 3 >= sizeof(hex))
+        len = (sizeof(hex) - 1) / 3;
+
+    for (i = 0; i < len; i++)
+        _snprintf(hex + i * 3, 4, "%02x%s",
+                  p[i], (i + 1 < len) ? " " : "");
+
+    hex[len * 3] = '\0';
+    return hex;
+}
+
 /* --------------------------------------------------------------- parsing */
 
 /* Parse "ar<type> <n> <n> ... <seq>" into a reply struct. */
@@ -241,6 +263,12 @@ static int op2_read_token(op2_dev *d, op2_reply *rep, PASSTHRU_MSG *msg,
             if (msg->DataSize > J2534_MAX_DATA)
                 msg->DataSize = J2534_MAX_DATA;
             memcpy(msg->Data, payload + 5, msg->DataSize);
+            op2_log("RX frame proto=%lu status=%lu ts=%lu | payload(%lu)=[%s]",
+                    (unsigned long)msg->ProtocolID,
+                    (unsigned long)msg->RxStatus,
+                    (unsigned long)msg->Timestamp,
+                    (unsigned long)msg->DataSize,
+                    op2_hex(msg->Data, msg->DataSize));
         }
         return TOK_FRAME;
     }
@@ -263,6 +291,7 @@ static int op2_read_token(op2_dev *d, op2_reply *rep, PASSTHRU_MSG *msg,
         while (used && line[used - 1] == '\r')
             used--;
         line[used] = '\0';
+        op2_log("RX: %s", line);
         if (rep)
             parse_reply(line, rep);
         return TOK_REPLY;
@@ -280,10 +309,8 @@ void op2_pump(op2_dev *d)
         if (t == TOK_FRAME) {
             if (!op2_rx_push(d, &m))
                 op2_log("RX queue full, dropped frame");
-        } else if (t == TOK_REPLY) {
-            op2_log("RX async reply: %s", rep.text);
-        } else {
-            break;
+        } else if (t != TOK_REPLY) {
+            break;              /* nothing more within the window, or I/O error */
         }
     }
 }
@@ -345,7 +372,8 @@ long op2_command(op2_dev *d, op2_reply *rep, DWORD timeout_ms,
      * That echo is what lets us match reply to request. */
     n += _snprintf(cmd + n, sizeof(cmd) - n - 1, " %lu\r\n", seq);
 
-    op2_log("TX: %.*s%s", n - 2, cmd, body_len ? " (+payload)" : "");
+    op2_log("TX: %.*s | payload(%lu)=[%s]", n - 2, cmd,
+            (unsigned long)body_len, op2_hex(body, body_len));
 
     if (!op2_port_write(&d->port, cmd, (size_t)n))
         return ERR_DEVICE_NOT_CONNECTED;
@@ -372,8 +400,6 @@ long op2_command(op2_dev *d, op2_reply *rep, DWORD timeout_ms,
         }
         if (t != TOK_REPLY)
             continue;
-
-        op2_log("RX: %s", rep->text);
 
         /* 'ari' (identify) carries no sequence number. */
         if (rep->type == 'i')
